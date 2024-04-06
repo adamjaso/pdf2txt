@@ -72,6 +72,7 @@ type (
 		TextLine string  `json:"text_line,omitempty"`
 	}
 	PageElements struct {
+		page             *Page      `json:"-"`
 		Number           int        `json:"number"`
 		MX               float64    `json:"mx"`
 		MY               float64    `json:"my"`
@@ -162,6 +163,7 @@ func (t *PageElements) addXYText(x, y float64, text string) *Element {
 
 func ParsePageElements(p *Page, verbose bool) *PageElements {
 	t := &PageElements{
+		page:     p,
 		Number:   p.Number,
 		Elements: []*Element{},
 		MX:       0,
@@ -217,6 +219,7 @@ func ParsePages(pages []*Page, verbose bool) []*PageElements {
 
 func ParsePageElementsBytes(p *Page, verbose bool) *PageElements {
 	t := &PageElements{
+		page:     p,
 		Number:   p.Number,
 		Elements: []*Element{},
 	}
@@ -261,13 +264,13 @@ func (rc *RenderConfig) Calculate(pel []*PageElements) {
 			continue
 		}
 		for _, e := range p.Elements {
-			xpos := float64(int64(e.X0/p.MX*width) + 1)
+			xpos := float64(int64(e.X0/p.page.Width*width) + 1)
 			if rc.Fit {
 				xendpos := width - float64(len(e.Text))
 				xpos = math.Min(xpos, xendpos)
 			}
 			e.X = int64(xpos)
-			e.Y = int64((p.MY - e.Y0) / p.MY * height)
+			e.Y = int64((p.page.Height - e.Y0) / p.page.Height * height)
 		}
 		sort.SliceStable(p.Elements, func(i, j int) bool {
 			return p.Elements[i].Less(p.Elements[j])

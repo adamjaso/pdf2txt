@@ -8,15 +8,26 @@ import (
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
+	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
 )
 
 type (
 	Page struct {
+		Width  float64  `json:"width"`
+		Height float64  `json:"height"`
 		Number int      `json:"page"`
 		Lines  []string `json:"lines,omitempty"`
 		Text   string   `json:"text,omitempty"`
 	}
 )
+
+func ExtractInfo(ctx *model.Context, filename string) (*pdfcpu.PDFInfo, error) {
+	pages := types.IntSet{}
+	for p := 1; p <= ctx.PageCount; p += 1 {
+		pages[p] = true
+	}
+	return pdfcpu.Info(ctx, filename, pages)
+}
 
 func ExtractText(rs io.ReadSeeker, output io.Writer) (*model.Context, error) {
 	conf := model.NewDefaultConfiguration()
@@ -44,9 +55,17 @@ func ExtractPages(rs io.ReadSeeker, parseLines bool) ([]*Page, error) {
 	if err != nil {
 		return nil, err
 	}
+	info, err := ExtractInfo(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	var dim types.Dim
+	for dim = range info.PageDimensions {
+	}
+	//fmt.Fprintf(os.Stderr, "%+v\n", info)
 	pages := make([]*Page, ctx.PageCount)
 	for p := 1; p <= ctx.PageCount; p += 1 {
-		page := &Page{Number: p}
+		page := &Page{Number: p, Width: dim.Width, Height: dim.Height}
 		text := &bytes.Buffer{}
 		if r, err := pdfcpu.ExtractPageContent(ctx, p); err != nil {
 			return nil, err

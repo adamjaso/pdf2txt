@@ -16,10 +16,13 @@ import (
 var (
 	isXYPattern        = regexp.MustCompile(".* Tm$")
 	isNLPattern        = regexp.MustCompile(`\s*ET\s*`)
-	isTextPattern      = regexp.MustCompile(".*T[Jj]$")
+	isTextPattern      = regexp.MustCompile(".*T[Jj]\\s*$")
 	ignorePattern      = regexp.MustCompile(`.* Tf\s*$`)
+	textTdOnlyPattern  = regexp.MustCompile(`\s*(-?\d+)\s+(-?\d+)\s+Td\s*`)
+	textTjOnlyPattern  = regexp.MustCompile(`^\s*\((.+?)\)\s+Tj\s*$`)
 	textTJSqParPattern = regexp.MustCompile(`^\s*\[(\(.+\))\]\s+TJ\s*$`)
 	textTjParPattern   = regexp.MustCompile(`^\s*(\(.+\))Tj$`)
+	textTjCharPattern  = regexp.MustCompile(`\s*(-?\d+)\s+(-?\d+)\s+Td\s+\((.+?)\)\s+Tj\s*`)
 	textBytesPattern   = regexp.MustCompile(`^\s*<([0-9A-F]+)>\s*Tj\s*$`)
 )
 
@@ -60,16 +63,18 @@ type (
 		Verbose       bool
 		Fit           bool
 		VerticalSpace bool
+		UseMax        bool
 		ParseBytes    bool
 	}
 	Element struct {
-		X        int64   `json:"x,omitempty"`
-		Y        int64   `json:"y,omitempty"`
-		X0       float64 `json:"x0"`
-		Y0       float64 `json:"y0"`
-		Text     string  `json:"text"`
-		XYLine   string  `json:"xy_line,omitempty"`
-		TextLine string  `json:"text_line,omitempty"`
+		X          int64   `json:"x,omitempty"`
+		Y          int64   `json:"y,omitempty"`
+		X0         float64 `json:"x0"`
+		Y0         float64 `json:"y0"`
+		Text       string  `json:"text"`
+		XYLine     string  `json:"xy_line,omitempty"`
+		TextLine   string  `json:"text_line,omitempty"`
+		MatchIndex int     `json:"match_index,omitempty"`
 	}
 	PageElements struct {
 		page             *Page      `json:"-"`
@@ -129,6 +134,28 @@ func (t *PageElements) parseText(line string) (string, error) {
 	return "", fmt.Errorf("parsetext: no matches for %q", line)
 }
 
+func (t *PageElements) parseChars(line string) error {
+	matches := textTjCharPattern.FindAllStringSubmatch(line, -1)
+	if len(matches) == 0 {
+		return fmt.Errorf("no tjcharpattern match for line %q", line)
+	}
+	t.x, _ = strconv.ParseFloat(matches[0][1], 64)
+	t.y, _ = strconv.ParseFloat(matches[0][2], 64)
+	t.MX = math.Max(t.MX, t.x)
+	t.MY = math.Max(t.MY, t.y)
+	t.addXYText(t.x, t.y, matches[0][3]).MatchIndex = 0
+	for i, row := range matches[1:] {
+		dx, _ := strconv.ParseFloat(row[1], 64)
+		dy, _ := strconv.ParseFloat(row[2], 64)
+		t.x += dx
+		t.y += dy
+		t.MX = math.Max(t.MX, t.x)
+		t.MY = math.Max(t.MY, t.y)
+		t.addXYText(t.x, t.y, row[3]).MatchIndex = i + 1
+	}
+	return nil
+}
+
 func parseTJLine(line string) string {
 	text := &bytes.Buffer{}
 	inside := false
@@ -161,8 +188,35 @@ func (t *PageElements) addXYText(x, y float64, text string) *Element {
 	return el
 }
 
-func ParsePageElements(p *Page, verbose bool) *PageElements {
-	t := &PageElements{
+func (t *PageElements) parseTdOnly(line string) error {
+	if matches := textTdOnlyPattern.FindAllStringSubmatch(line, -1); matches != nil {
+		dx, _ := strconv.ParseFloat(matches[0][1], 64)
+		dy, _ := strconv.ParseFloat(matches[0][2], 64)
+		t.x += dx
+		t.y += dy
+	}
+	return nil
+}
+
+func (t *PageElements) parseTjOnly(line string) (string, error) {
+	if matches := textTjOnlyPattern.FindAllStringSubmatch(line, -1); len(matches[0]) > 1 {
+		return matches[0][1], nil
+	}
+	return "", nil
+}
+
+func (t *PageElements) reset() {
+	t.x = 0
+	t.y = 0
+	t.xyLine = ""
+	t.textLine = ""
+}
+
+func (t *PageElements) buildElements() {
+}
+
+func newPageElements(p *Page) *PageElements {
+	return &PageElements{
 		page:     p,
 		Number:   p.Number,
 		Elements: []*Element{},
@@ -172,6 +226,10 @@ func ParsePageElements(p *Page, verbose bool) *PageElements {
 		x:        0,
 		y:        0,
 	}
+}
+
+func ParsePageElements(p *Page, verbose bool) *PageElements {
+	t := newPageElements(p)
 	for lnum, line := range p.Lines {
 		if isXYPattern.MatchString(line) {
 			t.xyLine = line
@@ -196,10 +254,7 @@ func ParsePageElements(p *Page, verbose bool) *PageElements {
 			}
 			continue
 		}
-		t.x = 0
-		t.y = 0
-		t.xyLine = ""
-		t.textLine = ""
+		t.reset()
 	}
 	for _, row := range t.table {
 		for _, el := range row {
@@ -215,6 +270,61 @@ func ParsePages(pages []*Page, verbose bool) []*PageElements {
 		elements = append(elements, ParsePageElements(p, verbose))
 	}
 	return elements
+}
+
+func ParsePageElementsDelimited(p *Page, verbose bool) *PageElements {
+	// Handles the following line formats:
+	//
+	// XPos YPos Td (Text here) Tj
+	//      this pattern specifies an X,Y pair, and text surrounded by parentheses between "Td" and "Tj" delimiters
+	// XOff YOff Td
+	//      this pattern specifies an X,Y offset from the previous pair
+	// (Text here) Tj
+	//      this pattern specifies the text positioned at the previously specified coordinates
+	// ET
+	//      this indicates the end of the offsets relative to the first X,Y position
+	t := newPageElements(p)
+	joinedLines := make([]string, 0)
+	curLine := ""
+	for _, line := range p.Lines {
+		if line == "ET" {
+			if curLine != "" {
+				joinedLines = append(joinedLines, curLine)
+				curLine = ""
+			}
+		} else if textTjCharPattern.MatchString(line) || textTdOnlyPattern.MatchString(line) || textTjOnlyPattern.MatchString(line) {
+			curLine += " " + line
+		}
+	}
+	if curLine != "" {
+		joinedLines = append(joinedLines, curLine)
+		curLine = ""
+	}
+	for _, line := range joinedLines {
+		if textTjCharPattern.MatchString(line) {
+			t.xyLine = line
+			if err := t.parseChars(line); err != nil {
+				if verbose {
+					log.Println(err)
+				}
+			}
+		}
+	}
+	for _, row := range t.table {
+		for _, el := range row {
+			t.Elements = append(t.Elements, el)
+		}
+	}
+	return t
+}
+
+func ParsePagesDelimited(pages []*Page, verbose bool) []*PageElements {
+	elements := []*PageElements{}
+	for _, p := range pages {
+		elements = append(elements, ParsePageElementsDelimited(p, verbose))
+	}
+	return elements
+
 }
 
 func ParsePageElementsBytes(p *Page, verbose bool) *PageElements {
@@ -260,17 +370,23 @@ func (rc *RenderConfig) Calculate(pel []*PageElements) {
 	width := float64(rc.Width)
 	height := float64(rc.Height)
 	for _, p := range pel {
+		pageWidth := float64(p.page.Width)
+		pageHeight := float64(p.page.Height)
+		if rc.UseMax {
+			pageWidth = p.MX
+			pageHeight = p.MY
+		}
 		if p.table == nil {
 			continue
 		}
 		for _, e := range p.Elements {
-			xpos := float64(int64(e.X0/p.page.Width*width) + 1)
+			xpos := float64(int64(e.X0/pageWidth*width) + 1)
 			if rc.Fit {
 				xendpos := width - float64(len(e.Text))
 				xpos = math.Min(xpos, xendpos)
 			}
 			e.X = int64(xpos)
-			e.Y = int64((p.page.Height - e.Y0) / p.page.Height * height)
+			e.Y = int64((pageHeight - e.Y0) / pageHeight * height)
 		}
 		sort.SliceStable(p.Elements, func(i, j int) bool {
 			return p.Elements[i].Less(p.Elements[j])

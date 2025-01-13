@@ -13,8 +13,8 @@ import (
 
 type (
 	App struct {
-		Positioned, Bytes, Raw, Lines, Elements bool
-		RenderConfig                            *extract.RenderConfig
+		UseMax, Delimited, Positioned, Bytes, Raw, Lines, Elements bool
+		RenderConfig                                               *extract.RenderConfig
 	}
 )
 
@@ -38,6 +38,8 @@ func convertPDF(app App, filename string, input io.ReadSeeker) {
 		var pel []*extract.PageElements
 		if app.Bytes {
 			pel = extract.ParsePagesBytes(pages, app.RenderConfig.Verbose)
+		} else if app.Delimited {
+			pel = extract.ParsePagesDelimited(pages, app.RenderConfig.Verbose)
 		} else if app.Positioned {
 			pel = extract.ParsePages(pages, app.RenderConfig.Verbose)
 		} else {
@@ -85,9 +87,11 @@ func main() {
 	flag.BoolVar(&app.Lines, "ol", false, "JSON output raw lines")
 	flag.BoolVar(&app.Elements, "oe", false, "JSON output parsed elements")
 	flag.BoolVar(&app.Positioned, "fp", false, "Parse as positioned text i.e. 1 0 0 1 XPos YPos Tm...[(Text here)] TJ...(Text here) Tj")
+	flag.BoolVar(&app.Delimited, "fd", false, "Parse as delimited text i.e. XPos YPos Td (Text here) Tj...XOff YOff Td...(Text here) Tj...ET")
 	flag.BoolVar(&app.Bytes, "fb", false, `Parse as byte strings i.e. <01234567890ABCDEF>Tj...ET -> bytestring(01, 23, ..., EF)..."\n"`)
 	flag.BoolVar(&app.RenderConfig.Verbose, "v", false, "Verbose output")
 	flag.BoolVar(&app.RenderConfig.Fit, "fit", false, "Fit output to constraints")
+	flag.BoolVar(&app.RenderConfig.UseMax, "usemax", false, "Use max detected X,Y dimensions when scaling page width/height")
 	flag.BoolVar(&app.RenderConfig.VerticalSpace, "verticalspace", false, "Show empty vertical space (i.e. on blank pages)")
 	flag.Int64Var(&app.RenderConfig.Width, "w", 160, "Output elements width")
 	flag.Int64Var(&app.RenderConfig.Height, "h", 120, "Output elements height")
